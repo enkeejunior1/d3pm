@@ -146,11 +146,14 @@ class D3PM(nn.Module):
         self.n_T = n_T
         self.hybrid_loss_coeff = hybrid_loss_coeff
 
-        steps = torch.arange(n_T + 1, dtype=torch.float64) / n_T
-        alpha_bar = torch.cos((steps + 0.008) / 1.008 * torch.pi / 2)
-        self.beta_t = torch.minimum(
-            1 - alpha_bar[1:] / alpha_bar[:-1], torch.ones_like(alpha_bar[1:]) * 0.999
-        )
+        if forward_type == 'uniform':
+            steps = torch.arange(n_T + 1, dtype=torch.float64) / n_T
+            alpha_bar = torch.cos((steps + 0.008) / 1.008 * torch.pi / 2)
+            self.beta_t = torch.minimum(
+                1 - alpha_bar[1:] / alpha_bar[:-1], torch.ones_like(alpha_bar[1:]) * 0.999
+            )
+        elif forward_type == 'absorbing':
+            self.beta_t = 1. / torch.linspace(n_T, 1., n_T)
 
         # self.beta_t = [1 / (self.n_T - t + 1) for t in range(1, self.n_T + 1)]
         self.eps = 1e-6
@@ -163,6 +166,10 @@ class D3PM(nn.Module):
             if forward_type == "uniform":
                 mat = torch.ones(num_classes, num_classes) * beta / num_classes
                 mat.diagonal().fill_(1 - (num_classes - 1) * beta / num_classes)
+                q_onestep_mats.append(mat)
+            elif forward_type == "absorbing":
+                mat = torch.eye((self.num_classes), dtype=torch.float64) * (1. - beta)
+                mat[:, self.num_classes//2] += beta
                 q_onestep_mats.append(mat)
             else:
                 raise NotImplementedError
@@ -341,8 +348,9 @@ class D3PM(nn.Module):
 
 if __name__ == "__main__":
 
-    N = 2  # number of classes for discretized state per pixel
-    d3pm = D3PM(DummyX0Model(1, N), 1000, num_classes=N, hybrid_loss_coeff=0.0).cuda()
+    N = 16  # number of classes for discretized state per pixel
+    forward_type = 'absorbing'
+    d3pm = D3PM(DummyX0Model(1, N), 1000, num_classes=N, hybrid_loss_coeff=0.0, forward_type=forward_type).cuda()
     print(f"Total Param Count: {sum([p.numel() for p in d3pm.x0_model.parameters()])}")
     dataset = MNIST(
         "./data",
@@ -360,7 +368,7 @@ if __name__ == "__main__":
     optim = torch.optim.AdamW(d3pm.x0_model.parameters(), lr=1e-3)
     d3pm.train()
 
-    n_epoch = 400
+    n_epoch = 5
     device = "cuda"
 
     global_step = 0
@@ -398,7 +406,10 @@ if __name__ == "__main__":
 
                 with torch.no_grad():
                     cond = torch.arange(0, 4).cuda() % 10
-                    init_noise = torch.randint(0, N, (4, 1, 32, 32)).cuda()
+                    init_noise = (
+                        torch.randint(0, N, (4, 1, 32, 32)).cuda() if forward_type == 'uniform' else 
+                        torch.full((4, 1, 32, 32), N//2).cuda() 
+                    )
 
                     images = d3pm.sample_with_image_sequence(
                         init_noise, cond, stride=40
